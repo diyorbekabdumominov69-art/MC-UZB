@@ -1,5 +1,8 @@
 
+import { firebaseConfig } from "./firebase-config.js";
+
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-app.js";
+
 import {
   getAuth,
   GoogleAuthProvider,
@@ -7,372 +10,511 @@ import {
   signOut,
   onAuthStateChanged
 } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-auth.js";
+
 import {
   getFirestore,
   collection,
   addDoc,
-  getDocs,
   doc,
-  getDoc,
   updateDoc,
-  arrayUnion,
+  onSnapshot,
   query,
   where,
   orderBy,
-  limit,
-  onSnapshot,
-  serverTimestamp
+  serverTimestamp,
+  arrayUnion
 } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-firestore.js";
 
-const firebaseConfig = {
-  apiKey: "YOUR_API_KEY",
-  authDomain: "YOUR_PROJECT.firebaseapp.com",
-  projectId: "YOUR_PROJECT_ID",
-  storageBucket: "YOUR_PROJECT.firebasestorage.app",
-  messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
-  appId: "YOUR_APP_ID"
-};
+const ADMIN_EMAIL = "diyorbekabdumominov69@gmail.com";
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
 const provider = new GoogleAuthProvider();
 
-const ADMIN_EMAIL = "diyorbekabdumominov69@gmail.com";
+let currentUser = null;
+let communities = [];
+let selectedCommunityId = "";
+let stopCommunities = null;
+let stopMessages = null;
 
 const $ = (id) => document.getElementById(id);
 
-let currentUser = null;
-let communities = [];
-let stopChatListener = null;
+function show(id, visible) {
+  const el = $(id);
+  if (el) el.hidden = !visible;
+}
 
-function isAdmin() {
+function status(id, message) {
+  const el = $(id);
+  if (el) el.textContent = message;
+}
+
+function admin() {
   return currentUser?.email?.toLowerCase() === ADMIN_EMAIL;
 }
 
-function showStatus(id, message) {
-  $(id).textContent = message;
+function errorMessage(error) {
+  console.error(error);
+
+  if (error.code === "permission-denied") {
+    return "Ruxsat berilmadi. Firestore Security Rules sozlamalarini tekshiring.";
+  }
+
+  if (error.code === "auth/unauthorized-domain") {
+    return "Firebase Authentication ichida sayt domenini ruxsat etilganlar ro‘yxatiga qo‘shing.";
+  }
+
+  if (error.code === "auth/popup-closed-by-user") {
+    return "Google orqali kirish oynasi yopildi.";
+  }
+
+  return error.message || "Xatolik yuz berdi.";
 }
 
-function makeElement(tag, className, text = "") {
-  const element = document.createElement(tag);
-  element.className = className;
-  element.textContent = text;
-  return element;
-}
+/* Google login */
 
-$("loginBtn").addEventListener("click", async () => {
+$("loginBtn")?.addEventListener("click", async () => {
   try {
     await signInWithPopup(auth, provider);
   } catch (error) {
-    alert("Kirish amalga oshmadi: " + error.message);
+    alert(errorMessage(error));
   }
 });
 
-$("logoutBtn").addEventListener("click", async () => {
+/* Logout */
+
+$("logoutBtn")?.addEventListener("click", async () => {
   try {
     await signOut(auth);
   } catch (error) {
-    alert("Chiqishda xatolik yuz berdi.");
+    alert(errorMessage(error));
   }
 });
 
-onAuthStateChanged(auth, async (user) => {
+/* Login holatini tekshirish */
+
+onAuthStateChanged(auth, (user) => {
   currentUser = user;
 
-  $("loginBtn").hidden = !!user;
-  $("logoutBtn").hidden = !user;
-  $("userLabel").textContent = user?.displayName || user?.email || "Mehmon";
-  $("adminMenu").hidden = !isAdmin();
-  $("admin").hidden = !isAdmin();
+  if (stopCommunities) stopCommunities();
+  if (stopMessages) stopMessages();
 
-  if (stopChatListener) {
-    stopChatListener();
-    stopChatListener = null;
+  stopCommunities = null;
+  stopMessages = null;
+  communities = [];
+  selectedCommunityId = "";
+
+  show("loginBtn", !user);
+  show("logoutBtn", !!user);
+  show("adminMenu", admin());
+  show("admin", admin());
+
+  status(
+    "userLabel",
+    user
+      ? `${user.displayName || "Foydalanuvchi"}${admin() ? " · ADMIN" : ""}`
+      : "Mehmon"
+  );
+
+  renderCommunities();
+  renderCommunityOptions();
+
+  if (user) {
+    listenCommunities();
+  } else {
+    renderMessages([]);
+    status("chatStatus", "Chat uchun Google orqali kiring.");
   }
-
-  if (!user) {
-    communities = [];
-    renderCommunities();
-    renderCommunityOptions();
-    $("chatMessages").replaceChildren(
-      makeElement("p", "muted", "Chat uchun Google orqali kiring.")
-    );
-    return;
-  }
-
-  await loadCommunities();
 });
 
-async function loadCommunities() {
-  try {
-    const ref = collection(db, "communities");
+/* Communitylarni olish */
 
-    // Admin barcha community'larni ko‘radi.
-    // Oddiy foydalanuvchi faqat o‘zi a’zo bo‘lganlarini ko‘radi.
-    const q = isAdmin()
-      ? query(ref, orderBy("createdAt", "desc"))
-      : query(
-          ref,
-          where("memberEmails", "array-contains",
-            currentUser.email.toLowerCase())
-        );
+function listenCommunities() {
+  const ref = collection(db, "communities");
 
-    const snapshot = await getDocs(q);
+  const q = admin()
+    ? ref
+    : query(
+        ref,
+        where("memberEmails", "array-contains", currentUser.email)
+      );
 
-    communities = snapshot.docs.map((item) => ({
-      id: item.id,
-      ...item.data()
-    }));
+  stopCommunities = onSnapshot(
+    q,
+    (snapshot) => {
+      communities = snapshot.docs.map((item) => ({
+        id: item.id,
+        ...item.data()
+      }));
 
-    renderCommunities();
-    renderCommunityOptions();
-  } catch (error) {
-    showStatus("adminStatus",
-      "Community yuklanmadi. Firebase Rules sozlamalarini tekshiring.");
-    console.error(error);
-  }
+      communities.sort((a, b) =>
+        (a.name || "").localeCompare(b.name || "")
+      );
+
+      if (
+        !communities.some((c) => c.id === selectedCommunityId)
+      ) {
+        selectedCommunityId = communities[0]?.id || "";
+      }
+
+      renderCommunities();
+      renderCommunityOptions();
+      renderAdminOptions();
+      listenMessages();
+    },
+    (error) => {
+      status("chatStatus", errorMessage(error));
+      status("adminStatus", errorMessage(error));
+    }
+  );
 }
+
+/* Community kartalari */
 
 function renderCommunities() {
   const list = $("communityList");
+  if (!list) return;
+
   list.replaceChildren();
 
   if (!currentUser) {
-    list.append(makeElement("p", "muted",
-      "Community’larni ko‘rish uchun Google orqali kiring."));
+    list.textContent = "Communitylarni ko‘rish uchun Google orqali kiring.";
     return;
   }
 
-  if (!communities.length) {
-    list.append(makeElement("p", "muted",
-      isAdmin()
-        ? "Hali community yo‘q. Admin Panel orqali yarating."
-        : "Siz hali hech qaysi community’ga qo‘shilmagansiz."));
+  if (communities.length === 0) {
+    list.textContent = "Hozircha community yo‘q yoki siz a'zo emassiz.";
     return;
   }
 
-  communities.forEach((community) => {
-    const card = makeElement("article", "community-item");
-    card.append(makeElement("h3", "", community.name || "Community"));
-    card.append(makeElement("p", "muted",
-      `A’zolar: ${(community.memberEmails || []).length}`));
-    card.append(makeElement("p", "muted",
-      isAdmin() ? "Admin boshqaruvi yoqilgan" : "Siz ushbu community a’zosisiz"));
+  for (const community of communities) {
+    const card = document.createElement("div");
+    card.className = "community-item";
+
+    const info = document.createElement("div");
+    const name = document.createElement("strong");
+    const count = document.createElement("small");
+    const button = document.createElement("button");
+
+    name.textContent = community.name || "Community";
+    count.textContent =
+      `${community.memberEmails?.length || 0} ta a'zo`;
+
+    button.className = "btn btn-small";
+    button.type = "button";
+    button.textContent =
+      community.id === selectedCommunityId ? "Tanlangan" : "Ochish";
+
+    button.addEventListener("click", () => {
+      selectedCommunityId = community.id;
+      renderCommunities();
+      renderCommunityOptions();
+      listenMessages();
+    });
+
+    info.append(name, count);
+    card.append(info, button);
     list.append(card);
-  });
+  }
 }
+
+/* Chat community tanlash */
 
 function renderCommunityOptions() {
-  for (const id of ["chatCommunity", "memberCommunity"]) {
-    const select = $(id);
-    const previousValue = select.value;
-    select.replaceChildren();
+  const select = $("chatCommunity");
+  if (!select) return;
 
-    const first = document.createElement("option");
-    first.value = "";
-    first.textContent = "Community tanlang";
-    select.append(first);
+  select.replaceChildren();
 
-    communities.forEach((community) => {
-      const option = document.createElement("option");
-      option.value = community.id;
-      option.textContent = community.name;
-      select.append(option);
-    });
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "Community tanlang";
+  select.append(placeholder);
 
-    if (communities.some((c) => c.id === previousValue)) {
-      select.value = previousValue;
-    }
+  for (const community of communities) {
+    const option = document.createElement("option");
+    option.value = community.id;
+    option.textContent = community.name || "Community";
+    select.append(option);
   }
 
-  if (!$("admin").hidden) {
-    $("memberCommunity").disabled = !isAdmin();
-  }
+  select.value = selectedCommunityId;
 }
 
-$("createCommunityForm").addEventListener("submit", async (event) => {
-  event.preventDefault();
-
-  if (!isAdmin()) {
-    showStatus("adminStatus", "Bu amal faqat admin uchun.");
-    return;
-  }
-
-  const name = $("communityName").value.trim();
-  if (!name) return;
-
-  try {
-    await addDoc(collection(db, "communities"), {
-      name,
-      createdBy: currentUser.email.toLowerCase(),
-      memberEmails: [currentUser.email.toLowerCase()],
-      createdAt: serverTimestamp()
-    });
-
-    $("communityName").value = "";
-    showStatus("adminStatus", "Community yaratildi!");
-    await loadCommunities();
-  } catch (error) {
-    showStatus("adminStatus", "Yaratishda xatolik. Firebase Rules'ni tekshiring.");
-    console.error(error);
-  }
+$("chatCommunity")?.addEventListener("change", (event) => {
+  selectedCommunityId = event.target.value;
+  renderCommunities();
+  listenMessages();
 });
 
-$("addMemberForm").addEventListener("submit", async (event) => {
-  event.preventDefault();
+/* Xabarlarni ko‘rsatish */
 
-  if (!isAdmin()) {
-    showStatus("adminStatus", "Bu amal faqat admin uchun.");
-    return;
-  }
+function renderMessages(messages) {
+  const box = $("chatMessages");
+  if (!box) return;
 
-  const communityId = $("memberCommunity").value;
-  const email = $("memberEmail").value.trim().toLowerCase();
-
-  if (!communityId || !email) {
-    showStatus("adminStatus", "Community va emailni kiriting.");
-    return;
-  }
-
-  try {
-    const communityRef = doc(db, "communities", communityId);
-    const communitySnap = await getDoc(communityRef);
-
-    if (!communitySnap.exists()) {
-      showStatus("adminStatus", "Community topilmadi.");
-      return;
-    }
-
-    await updateDoc(communityRef, {
-      memberEmails: arrayUnion(email)
-    });
-
-    $("memberEmail").value = "";
-    showStatus("adminStatus",
-      `Taklif ro‘yxatiga ${email} qo‘shildi.`);
-    await loadCommunities();
-  } catch (error) {
-    showStatus("adminStatus", "A’zoni qo‘shib bo‘lmadi.");
-    console.error(error);
-  }
-});
-
-$("chatCommunity").addEventListener("change", () => {
-  subscribeToChat($("chatCommunity").value);
-});
-
-function subscribeToChat(communityId) {
-  if (stopChatListener) {
-    stopChatListener();
-    stopChatListener = null;
-  }
-
-  const messages = $("chatMessages");
-  messages.replaceChildren();
-
-  if (!currentUser || !communityId) {
-    messages.append(makeElement("p", "muted",
-      "Chat uchun community tanlang."));
-    return;
-  }
-
-  const selected = communities.find((c) => c.id === communityId);
-  if (!selected) {
-    messages.append(makeElement("p", "muted",
-      "Bu community siz uchun mavjud emas."));
-    return;
-  }
-
-  const q = query(
-    collection(db, "communities", communityId, "messages"),
-    orderBy("createdAt", "desc"),
-    limit(100)
-  );
-
-  stopChatListener = onSnapshot(q, (snapshot) => {
-    messages.replaceChildren();
-
-    const docs = [...snapshot.docs].reverse();
-
-    if (!docs.length) {
-      messages.append(makeElement("p", "muted",
-        "Birinchi xabarni siz yozing!"));
-    }
-
-    docs.forEach((item) => {
-      const data = item.data();
-      const bubble = makeElement("div", "chat-message");
-      bubble.append(makeElement("strong", "",
-        data.name || data.email || "Foydalanuvchi"));
-      bubble.append(makeElement("p", "", data.text || ""));
-
-      if (data.createdAt?.toDate) {
-        bubble.append(makeElement("time", "",
-          data.createdAt.toDate().toLocaleString("uz-UZ")));
-      }
-
-      messages.append(bubble);
-    });
-
-    messages.scrollTop = messages.scrollHeight;
-  }, (error) => {
-    messages.replaceChildren(
-      makeElement("p", "muted",
-        "Chatni yuklab bo‘lmadi. Firestore Rules'ni tekshiring.")
-    );
-    console.error(error);
-  });
-}
-
-$("chatForm").addEventListener("submit", async (event) => {
-  event.preventDefault();
+  box.replaceChildren();
 
   if (!currentUser) {
-    showStatus("chatStatus", "Avval Google orqali kiring.");
+    box.textContent = "Chat uchun Google orqali kiring.";
     return;
   }
 
-  const communityId = $("chatCommunity").value;
-  const text = $("chatInput").value.trim();
-  const community = communities.find((c) => c.id === communityId);
-
-  if (!community || !text) {
-    showStatus("chatStatus", "Community tanlang va xabar yozing.");
+  if (!selectedCommunityId) {
+    box.textContent = "Avval community tanlang.";
     return;
   }
 
-  if (
-    !isAdmin() &&
-    !(community.memberEmails || []).includes(
-      currentUser.email.toLowerCase()
-    )
-  ) {
-    showStatus("chatStatus", "Siz bu community a’zosi emassiz.");
+  if (!messages.length) {
+    box.textContent = "Hozircha xabar yo‘q.";
     return;
   }
 
-  $("chatInput").disabled = true;
+  for (const message of messages) {
+    const bubble = document.createElement("div");
+    bubble.className = "chat-message";
+
+    if (message.uid === currentUser.uid) {
+      bubble.classList.add("mine");
+    }
+
+    const author = document.createElement("strong");
+    author.textContent = message.displayName || message.email || "Foydalanuvchi";
+
+    const body = document.createElement("p");
+    body.textContent = message.text || "";
+
+    const time = document.createElement("time");
+    time.textContent = message.createdAt?.toDate
+      ? message.createdAt.toDate().toLocaleString()
+      : "Yangi xabar";
+
+    bubble.append(author, body, time);
+    box.append(bubble);
+  }
+
+  box.scrollTop = box.scrollHeight;
+}
+
+/* Jonli xabarlarni kuzatish */
+
+function listenMessages() {
+  if (stopMessages) stopMessages();
+  stopMessages = null;
+
+  renderMessages([]);
+
+  if (!currentUser || !selectedCommunityId) {
+    status("chatStatus", "Google orqali kiring va community tanlang.");
+    return;
+  }
+
+  const community = communities.find(
+    (item) => item.id === selectedCommunityId
+  );
+
+  if (!community) return;
+
+  status("chatStatus", `Chat: ${community.name}`);
+
+  const ref = collection(
+    db,
+    "communities",
+    selectedCommunityId,
+    "messages"
+  );
+
+  const q = query(ref, orderBy("createdAt", "asc"));
+
+  stopMessages = onSnapshot(
+    q,
+    (snapshot) => {
+      renderMessages(
+        snapshot.docs.map((item) => ({
+          id: item.id,
+          ...item.data()
+        }))
+      );
+    },
+    (error) => status("chatStatus", errorMessage(error))
+  );
+}
+
+/* Chatga xabar yuborish */
+
+$("chatForm")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+
+  if (!currentUser || !selectedCommunityId) {
+    status("chatStatus", "Google orqali kiring va community tanlang.");
+    return;
+  }
+
+  const input = $("chatInput");
+  const text = input?.value?.trim();
+
+  if (!text) return;
+
+  if (text.length > 1000) {
+    status("chatStatus", "Xabar 1000 belgidan oshmasin.");
+    return;
+  }
+
+  const community = communities.find(
+    (item) => item.id === selectedCommunityId
+  );
+
+  if (!community) {
+    status("chatStatus", "Siz bu community a'zosi emassiz.");
+    return;
+  }
+
+  const button = $("chatForm")?.querySelector('button[type="submit"]');
+  if (button) button.disabled = true;
 
   try {
     await addDoc(
-      collection(db, "communities", communityId, "messages"),
+      collection(db, "communities", selectedCommunityId, "messages"),
       {
         text,
-        email: currentUser.email.toLowerCase(),
-        name: currentUser.displayName || currentUser.email,
         uid: currentUser.uid,
+        email: currentUser.email,
+        displayName: currentUser.displayName || "Foydalanuvchi",
         createdAt: serverTimestamp()
       }
     );
 
-    $("chatInput").value = "";
-    showStatus("chatStatus", "");
+    input.value = "";
+    status("chatStatus", "Xabar yuborildi.");
   } catch (error) {
-    showStatus("chatStatus",
-      "Xabar yuborilmadi. Firebase Rules'ni tekshiring.");
-    console.error(error);
+    status("chatStatus", errorMessage(error));
   } finally {
-    $("chatInput").disabled = false;
+    if (button) button.disabled = false;
   }
 });
+
+/* Admin: yangi community */
+
+$("createCommunityForm")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+
+  if (!admin()) {
+    status("adminStatus", "Faqat admin community yarata oladi.");
+    return;
+  }
+
+  const name = $("communityName")?.value?.trim();
+
+  if (!name || name.length > 60) {
+    status("adminStatus", "Community nomini kiriting (1–60 belgi).");
+    return;
+  }
+
+  try {
+    await addDoc(collection(db, "communities"), {
+      name,
+      createdBy: currentUser.uid,
+      memberEmails: [ADMIN_EMAIL],
+      createdAt: serverTimestamp()
+    });
+
+    $("createCommunityForm").reset();
+    status("adminStatus", "Community yaratildi!");
+  } catch (error) {
+    status("adminStatus", errorMessage(error));
+  }
+});
+
+/* Admin: email orqali a'zo qo‘shish */
+
+$("addMemberForm")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+
+  if (!admin()) {
+    status("adminStatus", "Faqat admin a'zo qo‘sha oladi.");
+    return;
+  }
+
+  const communityId = $("memberCommunity")?.value;
+  const email = $("memberEmail")?.value?.trim()?.toLowerCase();
+
+  if (!communityId || !email) {
+    status("adminStatus", "Community va emailni kiriting.");
+    return;
+  }
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    status("adminStatus", "Email noto‘g‘ri.");
+    return;
+  }
+
+  try {
+    await updateDoc(doc(db, "communities", communityId), {
+      memberEmails: arrayUnion(email)
+    });
+
+    $("memberEmail").value = "";
+    status(
+      "adminStatus",
+      "A'zo qo‘shildi. U aynan shu email bilan Google orqali kirishi kerak."
+    );
+  } catch (error) {
+    status("adminStatus", errorMessage(error));
+  }
+});
+
+/* Admin formadagi communitylar */
+
+function renderAdminOptions() {
+  const select = $("memberCommunity");
+  if (!select || !admin()) return;
+
+  const previous = select.value;
+  select.replaceChildren();
+
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "Community tanlang";
+  select.append(placeholder);
+
+  for (const community of communities) {
+    const option = document.createElement("option");
+    option.value = community.id;
+    option.textContent = community.name || "Community";
+    select.append(option);
+  }
+
+  if (communities.some((c) => c.id === previous)) {
+    select.value = previous;
+  }
+}
+
+/* Tepaga qaytish tugmasi */
+
+const topButton = $("topButton");
+
+window.addEventListener("scroll", () => {
+  topButton?.classList.toggle("visible", window.scrollY > 350);
+});
+
+topButton?.addEventListener("click", () => {
+  window.scrollTo({ top: 0, behavior: "smooth" });
+});
+
+/* Kartalar animatsiyasi */
+
+if ("IntersectionObserver" in window) {
+  const observer = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (entry.isIntersecting) {
+        entry.target.classList.add("reveal");
+        observer.unobserve(entry.target);
+      }
+    }
+  }, { threshold: 0.12 });
+
+  document
+    .querySelectorAll(".server-card, .feature-card, .profile-card")
+    .forEach((element) => observer.observe(element));
+}
